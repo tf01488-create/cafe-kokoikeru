@@ -1,53 +1,18 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import fs from 'fs';
 
-const DB_PATH = '/tmp/cafe-kokoikeru.db';
-
-let db: Database.Database | null = null;
-
-function getDb(): Database.Database {
-  if (db) return db;
-
-  db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS stores (
-      id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      address TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS crowding_reports (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      store_id INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (store_id) REFERENCES stores(id)
-    );
-  `);
-
-  const count = (db.prepare('SELECT COUNT(*) as cnt FROM stores').get() as { cnt: number }).cnt;
-  if (count === 0) {
-    const insertStore = db.prepare('INSERT INTO stores (id, name, address) VALUES (?, ?, ?)');
-    const seedStores = db.transaction(() => {
-      insertStore.run(1, 'カフェ・サクラ', '渋谷区道玄坂1-2-3');
-      insertStore.run(2, 'コーヒーハウス新宿', '新宿区新宿3-4-5');
-      insertStore.run(3, 'ブルーボトル表参道', '港区南青山5-6-7');
-      insertStore.run(4, 'カフェ・ラ・テール銀座', '中央区銀座4-3-2');
-      insertStore.run(5, 'スターバックス池袋', '豊島区南池袋1-28-1');
-      insertStore.run(6, 'ドトールコーヒー上野', '台東区上野6-14-4');
-    });
-    seedStores();
-  }
-
-  return db;
-}
+const DATA_PATH = '/tmp/cafe-kokoikeru-data.json';
 
 export interface Store {
   id: number;
   name: string;
   address: string;
+}
+
+export interface CrowdingReport {
+  id: number;
+  storeId: number;
+  status: string;
+  createdAt: string;
 }
 
 export interface CrowdingStatus {
@@ -58,49 +23,71 @@ export interface CrowdingStatus {
   lastUpdated: string | null;
 }
 
+interface DataStore {
+  stores: Store[];
+  reports: CrowdingReport[];
+  nextReportId: number;
+}
+
+const SEED_STORES: Store[] = [
+  { id: 1, name: 'カフェ・サクラ', address: '渋谷区道玄坂1-2-3' },
+  { id: 2, name: 'コーヒーハウス新宿', address: '新宿区新宿3-4-5' },
+  { id: 3, name: 'ブルーボトル表参道', address: '港区南青山5-6-7' },
+  { id: 4, name: 'カフェ・ラ・テール銀座', address: '中央区銀座4-3-2' },
+  { id: 5, name: 'スターバックス池袋', address: '豊島区南池袋1-28-1' },
+  { id: 6, name: 'ドトールコーヒー上野', address: '台東区上野6-14-4' },
+];
+
+function loadData(): DataStore {
+  try {
+    const raw = fs.readFileSync(DATA_PATH, 'utf-8');
+    return JSON.parse(raw) as DataStore;
+  } catch {
+    return { stores: SEED_STORES, reports: [], nextReportId: 1 };
+  }
+}
+
+function saveData(data: DataStore): void {
+  fs.writeFileSync(DATA_PATH, JSON.stringify(data), 'utf-8');
+}
+
 export function getStores(): Store[] {
-  const database = getDb();
-  return database.prepare('SELECT id, name, address FROM stores ORDER BY id').all() as Store[];
+  return loadData().stores;
 }
 
 export function getCrowdingStatus(): CrowdingStatus[] {
-  const database = getDb();
+  const data = loadData();
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-  const stores = getStores();
+  return data.stores.map((store) => {
+    const storeReports = data.reports
+      .filter((r) => r.storeId === store.id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
-  const results: CrowdingStatus[] = stores.map((store) => {
-    const latest = database
-      .prepare(
-        `SELECT status, created_at FROM crowding_reports
-         WHERE store_id = ?
-         ORDER BY created_at DESC
-         LIMIT 1`
-      )
-      .get(store.id) as { status: string; created_at: string } | undefined;
-
-    const countRow = database
-      .prepare(
-        `SELECT COUNT(*) as cnt FROM crowding_reports
-         WHERE store_id = ?
-           AND created_at >= datetime('now', '-1 hour')`
-      )
-      .get(store.id) as { cnt: number };
+    const latest = storeReports[0] ?? null;
+    const recentCount = storeReports.filter((r) => r.createdAt >= oneHourAgo).length;
 
     return {
       storeId: store.id,
       storeName: store.name,
       status: latest ? latest.status : null,
-      reportCount: countRow.cnt,
-      lastUpdated: latest ? latest.created_at : null,
+      reportCount: recentCount,
+      lastUpdated: latest ? latest.createdAt : null,
     };
   });
-
-  return results;
 }
 
 export function addCrowdingReport(storeId: number, status: string): void {
-  const database = getDb();
-  database
-    .prepare('INSERT INTO crowding_reports (store_id, status) VALUES (?, ?)')
-    .run(storeId, status);
+  const data = loadData();
+  data.reports.push({
+    id: data.nextReportId++,
+    storeId,
+    status,
+    createdAt: new Date().toISOString(),
+  });
+  // Keep only last 1000 reports to avoid unbounded growth
+  if (data.reports.length > 1000) {
+    data.reports = data.reports.slice(-1000);
+  }
+  saveData(data);
 }
