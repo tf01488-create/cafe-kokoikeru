@@ -21,6 +21,7 @@ export interface CrowdingStatus {
   status: string | null;
   reportCount: number;
   lastUpdated: string | null;
+  freshnessLevel: 'fresh' | 'aging' | 'stale' | 'none';
 }
 
 interface DataStore {
@@ -38,6 +39,22 @@ const SEED_STORES: Store[] = [
   { id: 6, name: 'ドトールコーヒー上野', address: '台東区上野6-14-4' },
 ];
 
+// Millisecond thresholds for freshness levels
+const AGING_AFTER_MS = 60 * 60 * 1000;      // 1 hour
+const STALE_AFTER_MS = 3 * 60 * 60 * 1000;  // 3 hours
+
+// Promise-based write lock to prevent concurrent JSON file corruption
+let writeLock: Promise<void> = Promise.resolve();
+
+function withLock<T>(fn: () => T): Promise<T> {
+  const result = writeLock.then(() => fn());
+  writeLock = result.then(
+    () => {},
+    () => {}
+  );
+  return result;
+}
+
 function loadData(): DataStore {
   try {
     const raw = fs.readFileSync(DATA_PATH, 'utf-8');
@@ -49,6 +66,14 @@ function loadData(): DataStore {
 
 function saveData(data: DataStore): void {
   fs.writeFileSync(DATA_PATH, JSON.stringify(data), 'utf-8');
+}
+
+function computeFreshness(createdAt: string | null): CrowdingStatus['freshnessLevel'] {
+  if (!createdAt) return 'none';
+  const ageMs = Date.now() - new Date(createdAt).getTime();
+  if (ageMs > STALE_AFTER_MS) return 'stale';
+  if (ageMs > AGING_AFTER_MS) return 'aging';
+  return 'fresh';
 }
 
 export function getStores(): Store[] {
@@ -66,28 +91,32 @@ export function getCrowdingStatus(): CrowdingStatus[] {
 
     const latest = storeReports[0] ?? null;
     const recentCount = storeReports.filter((r) => r.createdAt >= oneHourAgo).length;
+    const freshnessLevel = computeFreshness(latest?.createdAt ?? null);
 
     return {
       storeId: store.id,
       storeName: store.name,
-      status: latest ? latest.status : null,
+      // Treat stale reports as "no info" — same as null
+      status: latest && freshnessLevel !== 'stale' ? latest.status : null,
       reportCount: recentCount,
       lastUpdated: latest ? latest.createdAt : null,
+      freshnessLevel,
     };
   });
 }
 
-export function addCrowdingReport(storeId: number, status: string): void {
-  const data = loadData();
-  data.reports.push({
-    id: data.nextReportId++,
-    storeId,
-    status,
-    createdAt: new Date().toISOString(),
+export async function addCrowdingReport(storeId: number, status: string): Promise<void> {
+  return withLock(() => {
+    const data = loadData();
+    data.reports.push({
+      id: data.nextReportId++,
+      storeId,
+      status,
+      createdAt: new Date().toISOString(),
+    });
+    if (data.reports.length > 1000) {
+      data.reports = data.reports.slice(-1000);
+    }
+    saveData(data);
   });
-  // Keep only last 1000 reports to avoid unbounded growth
-  if (data.reports.length > 1000) {
-    data.reports = data.reports.slice(-1000);
-  }
-  saveData(data);
 }

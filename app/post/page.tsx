@@ -98,9 +98,11 @@ function PostForm() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(
-          (data as { message?: string }).message ?? "報告の送信に失敗しました"
-        );
+        const serverMsg = (data as { error?: string }).error;
+        if (res.status === 429) {
+          throw new Error(serverMsg ?? "同じ店舗への連続投稿は5分間隔でお願いします");
+        }
+        throw new Error(serverMsg ?? "報告の送信に失敗しました");
       }
 
       setSuccess(true);

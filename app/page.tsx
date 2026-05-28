@@ -3,26 +3,44 @@
 import { useEffect, useState } from "react";
 import StoreCard from "@/components/StoreCard";
 
+type FreshnessLevel = 'fresh' | 'aging' | 'stale' | 'none';
+
 type CrowdingEntry = {
   storeId: number;
   storeName: string;
-  status: string;
+  status: string | null;
   reportCount: number;
   lastUpdated: string | null;
+  freshnessLevel: FreshnessLevel;
 };
 
-type CrowdingListProps = {
-  initialCrowding: CrowdingEntry[];
-};
+type ConnectionState = 'connecting' | 'connected' | 'error';
 
-function CrowdingList({ initialCrowding }: CrowdingListProps) {
+function CrowdingList({ initialCrowding }: { initialCrowding: CrowdingEntry[] }) {
   const [crowding, setCrowding] = useState<CrowdingEntry[]>(initialCrowding);
-  const [lastSseUpdate, setLastSseUpdate] = useState<Date | null>(null);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+  const [lastUpdateTime, setLastUpdateTime] = useState<Date | null>(null);
 
   useEffect(() => {
     const es = new EventSource("/api/stream");
 
-    es.onmessage = (event) => {
+    es.onopen = () => {
+      setConnectionState('connected');
+    };
+
+    // Named "init" event: full crowding state on (re)connect — syncs after reconnection
+    es.addEventListener('init', (event: MessageEvent) => {
+      try {
+        const data: CrowdingEntry[] = JSON.parse(event.data);
+        setCrowding(data);
+        setConnectionState('connected');
+      } catch {
+        // ignore parse errors
+      }
+    });
+
+    // Default "message" event: single store update broadcast on new post
+    es.onmessage = (event: MessageEvent) => {
       try {
         const data: CrowdingEntry = JSON.parse(event.data);
         setCrowding((prev) =>
@@ -30,14 +48,14 @@ function CrowdingList({ initialCrowding }: CrowdingListProps) {
             entry.storeId === data.storeId ? { ...entry, ...data } : entry
           )
         );
-        setLastSseUpdate(new Date());
+        setLastUpdateTime(new Date());
       } catch {
         // ignore parse errors
       }
     };
 
     es.onerror = () => {
-      // SSE connection error — browser will auto-reconnect
+      setConnectionState('error');
     };
 
     return () => {
@@ -45,8 +63,8 @@ function CrowdingList({ initialCrowding }: CrowdingListProps) {
     };
   }, []);
 
-  const formattedUpdateTime = lastSseUpdate
-    ? lastSseUpdate.toLocaleTimeString("ja-JP", {
+  const formattedUpdateTime = lastUpdateTime
+    ? lastUpdateTime.toLocaleTimeString("ja-JP", {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
@@ -67,10 +85,20 @@ function CrowdingList({ initialCrowding }: CrowdingListProps) {
           </p>
         </div>
         <div className="text-right shrink-0 ml-4">
-          {formattedUpdateTime ? (
+          {connectionState === 'connected' && formattedUpdateTime ? (
             <div className="flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-full px-3 py-1">
               <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse inline-block" />
               {formattedUpdateTime} 更新
+            </div>
+          ) : connectionState === 'connected' ? (
+            <div className="flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-full px-3 py-1">
+              <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+              リアルタイム接続中
+            </div>
+          ) : connectionState === 'error' ? (
+            <div className="flex items-center gap-1.5 text-xs text-red-600 bg-red-50 border border-red-200 rounded-full px-3 py-1">
+              <span className="w-2 h-2 rounded-full bg-red-500 inline-block" />
+              接続エラー（再接続中）
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-3 py-1">
@@ -93,9 +121,10 @@ function CrowdingList({ initialCrowding }: CrowdingListProps) {
               key={entry.storeId}
               storeId={entry.storeId}
               storeName={entry.storeName}
-              status={entry.status ?? null}
+              status={entry.status}
               reportCount={entry.reportCount}
               lastUpdated={entry.lastUpdated}
+              freshnessLevel={entry.freshnessLevel}
             />
           ))}
         </div>
